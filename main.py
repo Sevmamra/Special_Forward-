@@ -17,14 +17,22 @@ from telegram.ext import (
 )
 from config import Config
 
-# Logging setup
+# Initialize logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Bot states and data storage
+# Verify configuration
+if not Config.TOKEN:
+    logger.error("No TELEGRAM_BOT_TOKEN set in environment variables!")
+    exit(1)
+
+if Config.AUTHORIZED_USER_ID == 0:
+    logger.error("No valid AUTHORIZED_USER_ID set in environment variables!")
+    exit(1)
+
 class BotData:
     def __init__(self):
         self.received_items = {
@@ -35,9 +43,9 @@ class BotData:
         }
         self.collecting = False
         self.selected_groups: Set[int] = set()
-        self.selected_topics: Dict[int, Set[int]] = {}  # {group_id: set(topic_ids)}
+        self.selected_topics: Dict[int, Set[int]] = {}
         self.messages_to_forward: List[Dict] = []
-        self.groups_info: Dict[int, Dict] = {}  # {group_id: {'name': str, 'topics': Dict[int, str]}}
+        self.groups_info: Dict[int, Dict] = {}
 
 bot_data = BotData()
 
@@ -79,7 +87,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     message = update.message
     
-    # Count received items
     if message.video:
         bot_data.received_items['videos'] += 1
     elif message.document:
@@ -89,7 +96,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         bot_data.received_items['others'] += 1
     
-    # Store message for forwarding
     bot_data.messages_to_forward.append({
         'type': 'video' if message.video else 
                'document' if message.document else 
@@ -128,8 +134,7 @@ async def select_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if query.from_user.id != Config.AUTHORIZED_USER_ID:
         return
 
-    # In a real implementation, you would fetch the groups your bot is in
-    # For this example, we'll use some dummy data
+    # Dummy data - replace with actual group fetching in production
     bot_data.groups_info = {
         -1001234567890: {
             'name': "𝐂𝐀 𝐈𝐧𝐭𝐞𝐫 𝐗",
@@ -205,7 +210,6 @@ async def confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_text("Please select at least one group!")
         return
     
-    # For groups with topics, show topic selection
     groups_with_topics = {
         group_id: group_info 
         for group_id, group_info in bot_data.groups_info.items() 
@@ -234,7 +238,6 @@ async def show_topic_selection(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         ])
     
-    # Navigation buttons
     nav_buttons = []
     current_idx = list(bot_data.selected_groups).index(group_id)
     
@@ -362,7 +365,6 @@ async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     report += f"\nTotal: {success_count} successful, {failed_count} failed"
     
-    # Reset bot data
     bot_data.selected_groups = set()
     bot_data.selected_topics = {}
     bot_data.messages_to_forward = []
@@ -372,11 +374,9 @@ async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 def main() -> None:
     application = Application.builder().token(Config.TOKEN).build()
     
-    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("done", done))
     
-    # Message handler
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & 
         ~filters.COMMAND & 
@@ -384,7 +384,6 @@ def main() -> None:
         handle_message
     ))
     
-    # Callback query handlers
     application.add_handler(CallbackQueryHandler(start_process, pattern="^start_process$"))
     application.add_handler(CallbackQueryHandler(select_groups, pattern="^select_groups$"))
     application.add_handler(CallbackQueryHandler(toggle_group, pattern="^toggle_group:"))
@@ -395,7 +394,6 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(select_all_topics, pattern="^select_all_topics:"))
     application.add_handler(CallbackQueryHandler(forward_messages, pattern="^forward_messages$"))
     
-    # Run the bot
     application.run_polling()
 
 if __name__ == "__main__":
