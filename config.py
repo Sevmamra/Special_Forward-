@@ -1,6 +1,17 @@
 import os
 
 class Config:
-    TOKEN = os.getenv("7763888885:AAGGtCSMRc0tvvGCFJwRMmYJBR819JfiOmQ")
-    AUTHORIZED_USER_ID = int(os.getenv("6567162029"))  # Your Telegram user ID
-    ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", -1002501498159))  # Your admin group ID
+    # Get bot token from environment variables
+    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    
+    # Get authorized user ID (make sure to set this in .env)
+    try:
+        AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
+    except (ValueError, TypeError):
+        AUTHORIZED_USER_ID = 0  # Default invalid ID
+    
+    # Admin group ID (optional)
+    try:
+        ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "0"))
+    except (ValueError, TypeError):
+        ADMIN_GROUP_ID = 0
