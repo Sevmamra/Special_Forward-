@@ -39,15 +39,15 @@ class BotData:
         }
         self.collecting = False
         self.selected_groups: Set[int] = set()
-        self.selected_topics: Dict[int, Set[int]] = {}
+        self.selected_topics: Dict[int, Set[int]] = {}  # {group_id: set(topic_ids)}
         self.messages_to_forward: List[Dict] = []
-        self.groups_info: Dict[int, Dict] = {}
-        self.current_topic_name: Optional[str] = None
+        self.groups_info: Dict[int, Dict] = {}  # {group_id: {'name': str, 'topics': Dict[int, str]}}
+        self.current_group_index = 0  # For navigating between groups during topic selection
 
 bot_data = BotData()
 
 async def fetch_groups_info(context: ContextTypes.DEFAULT_TYPE) -> Dict[int, Dict]:
-    """Fetch info for all configured groups"""
+    """Fetch all groups and their topics where bot is admin"""
     groups_info = {}
     
     for group_id in Config.GROUP_IDS:
@@ -82,18 +82,6 @@ async def fetch_groups_info(context: ContextTypes.DEFAULT_TYPE) -> Dict[int, Dic
             logger.error(f"Error processing group {group_id}: {e}")
     
     return groups_info
-
-async def create_new_topic(context: ContextTypes.DEFAULT_TYPE, group_id: int, topic_name: str) -> Optional[int]:
-    """Create a new topic in the specified group"""
-    try:
-        result = await context.bot.create_forum_topic(
-            chat_id=group_id,
-            name=topic_name
-        )
-        return result.message_thread_id
-    except Exception as e:
-        logger.error(f"Error creating topic {topic_name} in group {group_id}: {e}")
-        return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != Config.AUTHORIZED_USER_ID:
@@ -212,7 +200,11 @@ def create_group_keyboard() -> InlineKeyboardMarkup:
     
     keyboard.append([
         InlineKeyboardButton("Select All", callback_data="select_all_groups"),
-        InlineKeyboardButton("Proceed ➡️", callback_data="confirm_send")
+        InlineKeyboardButton("Deselect All", callback_data="deselect_all_groups")
+    ])
+    
+    keyboard.append([
+        InlineKeyboardButton("Proceed to Topics ➡️", callback_data="confirm_send")
     ])
     
     return InlineKeyboardMarkup(keyboard)
@@ -248,6 +240,14 @@ async def select_all_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     bot_data.selected_groups = set(bot_data.groups_info.keys())
     await query.edit_message_reply_markup(create_group_keyboard())
 
+async def deselect_all_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    bot_data.selected_groups = set()
+    bot_data.selected_topics = {}
+    await query.edit_message_reply_markup(create_group_keyboard())
+
 async def confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -257,14 +257,15 @@ async def confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     
     # Check which groups have topics
-    groups_with_topics = {
-        group_id: group_info 
-        for group_id, group_info in bot_data.groups_info.items() 
-        if group_id in bot_data.selected_groups and group_info['topics']
-    }
+    groups_with_topics = {}
+    for group_id in bot_data.selected_groups:
+        group_info = bot_data.groups_info.get(group_id)
+        if group_info and group_info.get('topics'):
+            groups_with_topics[group_id] = group_info
     
     if groups_with_topics:
         bot_data.selected_topics = {group_id: set() for group_id in groups_with_topics}
+        bot_data.current_group_index = 0
         first_group_id = list(groups_with_topics.keys())[0]
         await show_topic_selection(update, context, first_group_id)
     else:
@@ -284,33 +285,37 @@ def create_topic_keyboard(group_id: int) -> InlineKeyboardMarkup:
             )
         ])
     
-    # Navigation buttons if multiple groups
-    if len(bot_data.selected_groups) > 1:
-        group_ids = list(bot_data.selected_groups)
-        current_idx = group_ids.index(group_id)
-        nav_buttons = []
-        
-        if current_idx > 0:
-            prev_group_id = group_ids[current_idx - 1]
-            nav_buttons.append(
-                InlineKeyboardButton("◀️ Prev", callback_data=f"select_topics:{prev_group_id}")
-            )
-        
-        if current_idx < len(group_ids) - 1:
-            next_group_id = group_ids[current_idx + 1]
-            nav_buttons.append(
-                InlineKeyboardButton("Next ▶️", callback_data=f"select_topics:{next_group_id}")
-            )
-        
-        if nav_buttons:
-            keyboard.append(nav_buttons)
+    # Navigation buttons
+    group_ids = [gid for gid in bot_data.selected_groups 
+                if gid in bot_data.groups_info 
+                and bot_data.groups_info[gid].get('topics')]
     
+    current_idx = group_ids.index(group_id)
+    nav_buttons = []
+    
+    if current_idx > 0:
+        prev_group_id = group_ids[current_idx - 1]
+        nav_buttons.append(
+            InlineKeyboardButton("◀️ Previous Group", callback_data=f"select_topics:{prev_group_id}")
+        )
+    
+    if current_idx < len(group_ids) - 1:
+        next_group_id = group_ids[current_idx + 1]
+        nav_buttons.append(
+            InlineKeyboardButton("Next Group ▶️", callback_data=f"select_topics:{next_group_id}")
+        )
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    # Control buttons
     keyboard.append([
-        InlineKeyboardButton("Select All", callback_data=f"select_all_topics:{group_id}"),
-        InlineKeyboardButton("Back to Groups", callback_data="select_groups")
+        InlineKeyboardButton("Select All Topics", callback_data=f"select_all_topics:{group_id}"),
+        InlineKeyboardButton("Deselect All", callback_data=f"deselect_all_topics:{group_id}")
     ])
     
     keyboard.append([
+        InlineKeyboardButton("Back to Groups", callback_data="select_groups"),
         InlineKeyboardButton("Send Now", callback_data="forward_messages")
     ])
     
@@ -352,6 +357,14 @@ async def select_all_topics(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     bot_data.selected_topics[group_id] = set(bot_data.groups_info[group_id]['topics'].keys())
     await query.edit_message_reply_markup(create_topic_keyboard(group_id))
 
+async def deselect_all_topics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    
+    group_id = int(query.data.split(':')[1])
+    bot_data.selected_topics[group_id] = set()
+    await query.edit_message_reply_markup(create_topic_keyboard(group_id))
+
 async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query:
@@ -369,6 +382,8 @@ async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     for group_id in bot_data.selected_groups:
         group_name = bot_data.groups_info[group_id]['name']
+        
+        # Get topics for this group (empty set if no topics selected)
         topic_ids = bot_data.selected_topics.get(group_id, {None})
         
         for topic_id in topic_ids:
@@ -433,60 +448,6 @@ async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     await (query.edit_message_text if query else update.message.reply_text)(report)
 
-async def handle_new_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle when user wants to create a new topic"""
-    if update.effective_user.id != Config.AUTHORIZED_USER_ID:
-        return
-
-    if not bot_data.selected_groups:
-        await update.message.reply_text("Please select groups first!")
-        return
-
-    topic_name = update.message.text
-    bot_data.current_topic_name = topic_name
-    
-    keyboard = []
-    for group_id in bot_data.selected_groups:
-        group_name = bot_data.groups_info[group_id]['name']
-        keyboard.append([
-            InlineKeyboardButton(
-                f"Create in {group_name}",
-                callback_data=f"create_topic:{group_id}"
-            )
-        ])
-    
-    await update.message.reply_text(
-        f"Create topic '{topic_name}' in which groups?",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def create_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Actually create the new topic"""
-    query = update.callback_query
-    await query.answer()
-    
-    if not bot_data.current_topic_name:
-        await query.edit_message_text("No topic name specified!")
-        return
-
-    group_id = int(query.data.split(':')[1])
-    
-    try:
-        topic_id = await create_new_topic(context, group_id, bot_data.current_topic_name)
-        if topic_id:
-            # Update our groups info
-            if group_id in bot_data.groups_info:
-                bot_data.groups_info[group_id]['topics'][topic_id] = bot_data.current_topic_name
-            
-            await query.edit_message_text(
-                f"✅ Created topic '{bot_data.current_topic_name}' in {bot_data.groups_info[group_id]['name']}"
-            )
-        else:
-            await query.edit_message_text("❌ Failed to create topic!")
-    except Exception as e:
-        logger.error(f"Error creating topic: {e}")
-        await query.edit_message_text("❌ Error creating topic!")
-
 def main() -> None:
     # Verify configuration
     if not Config.TOKEN:
@@ -507,7 +468,6 @@ def main() -> None:
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("done", done))
-    application.add_handler(CommandHandler("newtopic", handle_new_topic))
     application.add_handler(CommandHandler("refresh", refresh_groups))
     
     application.add_handler(MessageHandler(
@@ -523,12 +483,13 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(select_groups, pattern="^select_groups$"))
     application.add_handler(CallbackQueryHandler(toggle_group, pattern="^toggle_group:"))
     application.add_handler(CallbackQueryHandler(select_all_groups, pattern="^select_all_groups$"))
+    application.add_handler(CallbackQueryHandler(deselect_all_groups, pattern="^deselect_all_groups$"))
     application.add_handler(CallbackQueryHandler(confirm_send, pattern="^confirm_send$"))
     application.add_handler(CallbackQueryHandler(show_topic_selection, pattern="^select_topics:"))
     application.add_handler(CallbackQueryHandler(toggle_topic, pattern="^toggle_topic:"))
     application.add_handler(CallbackQueryHandler(select_all_topics, pattern="^select_all_topics:"))
+    application.add_handler(CallbackQueryHandler(deselect_all_topics, pattern="^deselect_all_topics:"))
     application.add_handler(CallbackQueryHandler(forward_messages, pattern="^forward_messages$"))
-    application.add_handler(CallbackQueryHandler(create_topic_handler, pattern="^create_topic:"))
     
     # Run bot
     logger.info("🤖 Bot is running...")
