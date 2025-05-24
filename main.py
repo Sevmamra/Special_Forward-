@@ -478,10 +478,11 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("done", done))
     
+    # Corrected message handler - using filters.Document.ALL instead of filters.DOCUMENT
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & 
         ~filters.COMMAND & 
-        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT),
+        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL),
         handle_message
     ))
     
