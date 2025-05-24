@@ -64,24 +64,25 @@ async def fetch_groups_info(context: ContextTypes.DEFAULT_TYPE) -> Dict[int, Dic
                 logger.warning(f"Bot is not admin in group {group_id}")
                 continue
             
-            # Get existing topics
-            topics = {}
-            try:
-                forum_topics = await context.bot.get_forum_topics(chat_id=group_id)
-                for topic in forum_topics.topics:
-                    topics[topic.message_thread_id] = topic.name
-            except Exception as e:
-                logger.info(f"Group {group_id} is not a forum or has no topics: {e}")
-            
+            # Initialize group info
             groups_info[group_id] = {
                 'name': chat.title,
-                'topics': topics
+                'topics': {}  # Will be populated when needed
             }
             
         except Exception as e:
             logger.error(f"Error processing group {group_id}: {e}")
     
     return groups_info
+
+async def get_group_topics(context: ContextTypes.DEFAULT_TYPE, group_id: int) -> Dict[int, str]:
+    """Get topics for a specific group"""
+    try:
+        forum_topics = await context.bot.get_forum_topics(chat_id=group_id)
+        return {topic.message_thread_id: topic.name for topic in forum_topics.topics}
+    except Exception as e:
+        logger.error(f"Error getting topics for group {group_id}: {e}")
+        return {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != Config.AUTHORIZED_USER_ID:
@@ -256,17 +257,28 @@ async def confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.answer("Please select at least one group!", show_alert=True)
         return
     
-    # Initialize with all topics selected by default
+    # Initialize topic selection
     bot_data.selected_topics = {}
-    for group_id in bot_data.selected_groups:
-        group_info = bot_data.groups_info.get(group_id)
-        if group_info and group_info.get('topics'):
-            bot_data.selected_topics[group_id] = set(group_info['topics'].keys())
+    groups_with_topics = []
     
-    # Show topics for first group
-    if bot_data.selected_groups:
-        first_group_id = list(bot_data.selected_groups)[0]
+    for group_id in bot_data.selected_groups:
+        # Get topics for this group
+        topics = await get_group_topics(context, group_id)
+        if topics:
+            bot_data.selected_topics[group_id] = set(topics.keys())
+            groups_with_topics.append(group_id)
+        # Update group info with topics
+        if group_id in bot_data.groups_info:
+            bot_data.groups_info[group_id]['topics'] = topics
+    
+    if groups_with_topics:
+        # Show topics for first group
+        bot_data.current_group_index = 0
+        first_group_id = groups_with_topics[0]
         await show_topic_selection(update, context, first_group_id)
+    else:
+        # No groups with topics found, forward directly
+        await forward_messages(update, context)
 
 def create_topic_keyboard(group_id: int) -> InlineKeyboardMarkup:
     group_info = bot_data.groups_info[group_id]
@@ -283,19 +295,21 @@ def create_topic_keyboard(group_id: int) -> InlineKeyboardMarkup:
             )
         ])
     
-    # Navigation between groups
-    selected_group_ids = list(bot_data.selected_groups)
-    current_index = selected_group_ids.index(group_id)
+    # Navigation between groups with topics
+    groups_with_topics = [gid for gid in bot_data.selected_groups 
+                         if gid in bot_data.groups_info 
+                         and bot_data.groups_info[gid].get('topics')]
+    current_index = groups_with_topics.index(group_id)
     
     nav_buttons = []
     if current_index > 0:
-        prev_group_id = selected_group_ids[current_index - 1]
+        prev_group_id = groups_with_topics[current_index - 1]
         nav_buttons.append(
             InlineKeyboardButton("⬅️ Previous Group", callback_data=f"select_topics:{prev_group_id}")
         )
     
-    if current_index < len(selected_group_ids) - 1:
-        next_group_id = selected_group_ids[current_index + 1]
+    if current_index < len(groups_with_topics) - 1:
+        next_group_id = groups_with_topics[current_index + 1]
         nav_buttons.append(
             InlineKeyboardButton("Next Group ➡️", callback_data=f"select_topics:{next_group_id}")
         )
@@ -305,7 +319,12 @@ def create_topic_keyboard(group_id: int) -> InlineKeyboardMarkup:
     
     # Control buttons
     keyboard.append([
-        InlineKeyboardButton("✅ Finish Selection", callback_data="forward_messages")
+        InlineKeyboardButton("Select All", callback_data=f"select_all_topics:{group_id}"),
+        InlineKeyboardButton("Deselect All", callback_data=f"deselect_all_topics:{group_id}")
+    ])
+    
+    keyboard.append([
+        InlineKeyboardButton("✅ Finish & Forward", callback_data="forward_messages")
     ])
     
     return InlineKeyboardMarkup(keyboard)
@@ -339,6 +358,24 @@ async def toggle_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     await query.edit_message_reply_markup(create_topic_keyboard(group_id))
 
+async def select_all_topics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    
+    group_id = int(query.data.split(':')[1])
+    if group_id in bot_data.groups_info and 'topics' in bot_data.groups_info[group_id]:
+        bot_data.selected_topics[group_id] = set(bot_data.groups_info[group_id]['topics'].keys())
+    await query.edit_message_reply_markup(create_topic_keyboard(group_id))
+
+async def deselect_all_topics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    
+    group_id = int(query.data.split(':')[1])
+    if group_id in bot_data.selected_topics:
+        bot_data.selected_topics[group_id] = set()
+    await query.edit_message_reply_markup(create_topic_keyboard(group_id))
+
 async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query:
@@ -357,13 +394,13 @@ async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     for group_id in bot_data.selected_groups:
         group_name = bot_data.groups_info[group_id]['name']
         
-        # Get topics for this group (empty set if no topics selected)
+        # Get topics for this group (None means general chat)
         topic_ids = bot_data.selected_topics.get(group_id, {None})
         
         for topic_id in topic_ids:
             topic_name = ""
-            if topic_id:
-                topic_name = f" (Topic: {bot_data.groups_info[group_id]['topics'][topic_id]})"
+            if topic_id is not None:
+                topic_name = f" (Topic: {bot_data.groups_info[group_id]['topics'].get(topic_id, 'Unknown')})"
             
             report += f"➡️ {group_name}{topic_name}:\n"
             success, failed = 0, 0
@@ -373,14 +410,14 @@ async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     if msg['type'] == 'text':
                         await context.bot.send_message(
                             chat_id=group_id,
-                            message_thread_id=topic_id,
+                            message_thread_id=topic_id if topic_id else None,
                             text=msg['content'],
                             entities=msg['entities']
                         )
                     elif msg['type'] == 'photo':
                         await context.bot.send_photo(
                             chat_id=group_id,
-                            message_thread_id=topic_id,
+                            message_thread_id=topic_id if topic_id else None,
                             photo=msg['content'],
                             caption=msg['caption'],
                             caption_entities=msg['entities']
@@ -388,7 +425,7 @@ async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     elif msg['type'] == 'video':
                         await context.bot.send_video(
                             chat_id=group_id,
-                            message_thread_id=topic_id,
+                            message_thread_id=topic_id if topic_id else None,
                             video=msg['content'],
                             caption=msg['caption'],
                             caption_entities=msg['entities']
@@ -396,7 +433,7 @@ async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     elif msg['type'] == 'document':
                         await context.bot.send_document(
                             chat_id=group_id,
-                            message_thread_id=topic_id,
+                            message_thread_id=topic_id if topic_id else None,
                             document=msg['content'],
                             caption=msg['caption'],
                             caption_entities=msg['entities']
@@ -461,6 +498,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(confirm_send, pattern="^confirm_send$"))
     application.add_handler(CallbackQueryHandler(show_topic_selection, pattern="^select_topics:"))
     application.add_handler(CallbackQueryHandler(toggle_topic, pattern="^toggle_topic:"))
+    application.add_handler(CallbackQueryHandler(select_all_topics, pattern="^select_all_topics:"))
+    application.add_handler(CallbackQueryHandler(deselect_all_topics, pattern="^deselect_all_topics:"))
     application.add_handler(CallbackQueryHandler(forward_messages, pattern="^forward_messages$"))
     
     # Run bot
